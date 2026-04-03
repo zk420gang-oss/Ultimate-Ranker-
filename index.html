@@ -1,0 +1,531 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search, Star, Trash2, X, Trophy, Brain, Loader2, ChevronLeft, LayoutGrid, Info, SlidersHorizontal, Zap } from 'lucide-react';
+
+// TMDB Configuration
+const TMDB_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjZjBkNDcwYTY2YjEzMDgwMGQzYTc0NzIwODkyN2Q3OCIsIm5iZiI6MTc3NTE5MDEwMy40NDUsInN1YiI6IjY5Y2Y0MDU3NWU4YzRkN2M3ZjVhMDA5MyIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.eEuKnUTLCXtiYRLs4a9uDJuVbv8JCHvsWIeQOmGh14w';
+
+const CATEGORIES = [
+  "Visuals", "Storyline", "Characters", "Cinematics", 
+  "Dialogues", "Pacing", "Music", "Acting", 
+  "Originality", "Ending"
+];
+
+const TIER_CONFIG = [
+  { id: 'S', label: 'S', color: 'bg-red-600', min: 9.0 },
+  { id: 'A', label: 'A', color: 'bg-blue-600', min: 7.5 },
+  { id: 'B', label: 'B', color: 'bg-green-600', min: 6.0 },
+  { id: 'C', label: 'C', color: 'bg-yellow-500', min: 4.0 },
+  { id: 'D', label: 'D', color: 'bg-orange-600', min: 0.0 },
+];
+
+export default function App() {
+  const [view, setView] = useState('home'); // 'home' or 'episodes'
+  const [query, setQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [rankedShows, setRankedShows] = useState([]);
+  const [selectedShow, setSelectedShow] = useState(null);
+  const [ratings, setRatings] = useState(CATEGORIES.reduce((acc, cat) => ({ ...acc, [cat]: 7 }), {}));
+  const [isSearching, setIsSearching] = useState(false);
+  
+  // Knowledge Ranking States
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [knowledgeScore, setKnowledgeScore] = useState(null);
+  const [showKnowledgeModal, setShowKnowledgeModal] = useState(false);
+
+  // Episode Matrix States
+  const [activeEpRanker, setActiveEpRanker] = useState(null);
+  const [fullShowData, setFullShowData] = useState(null);
+  const [isLoadingGrid, setIsLoadingGrid] = useState(false);
+  const [selectedCell, setSelectedCell] = useState(null);
+
+  // Stats Logic (The 3 Restored Infos)
+  const stats = useMemo(() => {
+    const count = rankedShows.length;
+    const avg = count > 0 ? (rankedShows.reduce((a, b) => a + b.score, 0) / count).toFixed(1) : "0.0";
+    // Simulated Knowledge accuracy for display
+    const kScore = knowledgeScore !== null ? `${knowledgeScore}%` : "??%";
+    return { count, avg, kScore };
+  }, [rankedShows, knowledgeScore]);
+
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      if (query.length >= 3) searchTMDB(query);
+      else setSearchResults([]);
+    }, 500);
+    return () => clearTimeout(delayDebounceFn);
+  }, [query]);
+
+  const searchTMDB = async (searchTerm) => {
+    setIsSearching(true);
+    try {
+      const response = await fetch(
+        `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(searchTerm)}&include_adult=false&language=en-US&page=1`,
+        { headers: { accept: 'application/json', Authorization: `Bearer ${TMDB_TOKEN}` } }
+      );
+      const data = await response.json();
+      setSearchResults(data.results.filter(item => item.poster_path));
+    } catch (err) {
+      console.error("Search error:", err);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const fetchFullGridData = async (show) => {
+    setIsLoadingGrid(true);
+    setView('episodes');
+    setActiveEpRanker(show);
+    try {
+      const res = await fetch(`https://api.themoviedb.org/3/tv/${show.tmdbId}?language=en-US`, {
+        headers: { accept: 'application/json', Authorization: `Bearer ${TMDB_TOKEN}` }
+      });
+      const showDetails = await res.json();
+      const validSeasons = (showDetails.seasons || []).filter(s => s.season_number > 0);
+      const grid = validSeasons.map(s => ({
+        seasonNumber: s.season_number,
+        episodeCount: s.episode_count,
+        name: s.name
+      }));
+      setFullShowData({ details: showDetails, grid });
+      if (grid.length > 0) setSelectedCell({ s: grid[0].seasonNumber, e: 1 });
+    } catch (err) {
+      console.error("Grid fetch error:", err);
+    } finally {
+      setIsLoadingGrid(false);
+    }
+  };
+
+  const saveRanking = () => {
+    const total = Object.values(ratings).reduce((a, b) => a + b, 0);
+    const average = total / CATEGORIES.length;
+    const newEntry = {
+      id: `${selectedShow.id}-${Date.now()}`,
+      tmdbId: selectedShow.id,
+      mediaType: selectedShow.media_type || (selectedShow.name ? 'tv' : 'movie'),
+      title: selectedShow.name || selectedShow.title,
+      year: (selectedShow.first_air_date || selectedShow.release_date || '').split('-')[0],
+      poster: `https://image.tmdb.org/t/p/w300${selectedShow.poster_path}`,
+      score: average,
+      globalScore: selectedShow.vote_average || 0,
+      globalCount: selectedShow.vote_count || 0,
+      scores: { ...ratings },
+      episodeRankings: {} 
+    };
+    setRankedShows(prev => [...prev, newEntry]);
+    setSelectedShow(null);
+    setQuery('');
+    setSearchResults([]);
+    setRatings(CATEGORIES.reduce((acc, cat) => ({ ...acc, [cat]: 7 }), {}));
+  };
+
+  const updateEpRating = (val) => {
+    if (!selectedCell || !activeEpRanker) return;
+    const { s, e } = selectedCell;
+    const score = parseFloat(val);
+    
+    setRankedShows(prev => prev.map(show => {
+      if (show.id === activeEpRanker.id) {
+        const updatedRankings = { ...show.episodeRankings };
+        if (!updatedRankings[s]) updatedRankings[s] = {};
+        updatedRankings[s][e] = score;
+        return { ...show, episodeRankings: updatedRankings };
+      }
+      return show;
+    }));
+
+    setActiveEpRanker(prev => ({
+      ...prev,
+      episodeRankings: {
+        ...prev.episodeRankings,
+        [s]: { ...prev.episodeRankings[s], [e]: score }
+      }
+    }));
+  };
+
+  const getCellColor = (score) => {
+    if (!score && score !== 0) return 'bg-[#121212] border border-white/5';
+    // Heatmap Scale: 1 (Red) to 10 (Blue)
+    if (score >= 9.5) return 'bg-[#0055ff] text-white shadow-[0_0_15px_rgba(0,85,255,0.4)]';
+    if (score >= 8.5) return 'bg-[#0088ff] text-white';
+    if (score >= 7.5) return 'bg-[#00c3ff] text-black';
+    if (score >= 6.5) return 'bg-[#00f2ff] text-black';
+    if (score >= 5.5) return 'bg-[#fbff00] text-black';
+    if (score >= 4.5) return 'bg-[#ffcc00] text-black';
+    if (score >= 3.0) return 'bg-[#ff7b00] text-white';
+    return 'bg-[#ff0000] text-white shadow-[0_0_15px_rgba(255,0,0,0.3)]';
+  };
+
+  const calculateKnowledge = () => {
+    if (rankedShows.length === 0) return;
+    setIsAnalyzing(true);
+    setTimeout(() => {
+      let totalDeviation = 0;
+      rankedShows.forEach(show => {
+        const diff = Math.abs(show.score - show.globalScore);
+        totalDeviation += Math.pow(diff, 1.6); 
+      });
+      const avgDeviation = totalDeviation / rankedShows.length;
+      const score = Math.max(0, Math.min(100, 100 - (avgDeviation * 12)));
+      setKnowledgeScore(Math.round(score));
+      setIsAnalyzing(false);
+      setShowKnowledgeModal(true);
+    }, 1500);
+  };
+
+  const removeShow = (id) => {
+    setRankedShows(prev => prev.filter(s => s.id !== id));
+    setKnowledgeScore(null);
+  };
+
+  const getTierForScore = (score) => {
+    return TIER_CONFIG.find(t => score >= t.min) || TIER_CONFIG[4];
+  };
+
+  // --- EPISODES VIEW WINDOW ---
+  if (view === 'episodes' && activeEpRanker) {
+    const gridData = fullShowData?.grid || [];
+    const maxEpisodesCount = gridData.length > 0 ? Math.max(0, ...gridData.map(s => s.episodeCount)) : 0;
+
+    return (
+      <div className="min-h-screen bg-black text-white flex flex-col font-sans overflow-hidden animate-in fade-in duration-300">
+        {/* Header */}
+        <div className="h-16 flex items-center justify-between px-6 border-b border-white/10 bg-[#080808] shrink-0">
+          <button 
+            onClick={() => { setView('home'); setFullShowData(null); }}
+            className="flex items-center gap-3 text-gray-500 hover:text-white transition-all group"
+          >
+            <div className="bg-white/5 p-2 rounded-lg group-hover:bg-white/10">
+                <ChevronLeft size={18} />
+            </div>
+            <span className="text-[10px] font-black uppercase tracking-[0.2em]">Exit Matrix</span>
+          </button>
+          <div className="hidden sm:flex items-center gap-2 bg-blue-500/10 px-4 py-2 rounded-full border border-blue-500/20">
+            <LayoutGrid size={14} className="text-blue-400" />
+            <span className="text-[9px] font-black text-blue-300 uppercase tracking-widest italic leading-none">Matrix Performance Grid</span>
+          </div>
+        </div>
+
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+          {/* Sidebar Profile */}
+          <div className="w-full lg:w-80 p-6 lg:p-10 border-r border-white/10 bg-[#050505] flex flex-row lg:flex-col items-center lg:items-start gap-6 shrink-0 overflow-y-auto">
+            <img src={activeEpRanker.poster} className="w-24 lg:w-full rounded-2xl shadow-2xl border border-white/10" alt="poster" />
+            <div className="flex-1 lg:w-full">
+                <h2 className="text-xl lg:text-3xl font-black tracking-tighter leading-none mb-2 uppercase italic">{activeEpRanker.title}</h2>
+                <div className="flex items-center gap-3">
+                    <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">{activeEpRanker.year}</span>
+                    <div className="w-1 h-1 bg-gray-700 rounded-full" />
+                    <span className="text-[10px] text-blue-500 font-black uppercase tracking-widest">Global Series</span>
+                </div>
+            </div>
+          </div>
+
+          {/* Matrix Grid */}
+          <div className="flex-1 overflow-auto bg-[#080808] p-4 lg:p-10 custom-scrollbar relative">
+            {isLoadingGrid ? (
+              <div className="h-full flex flex-col items-center justify-center gap-6">
+                <Loader2 size={32} className="text-blue-500 animate-spin" />
+                <p className="text-[9px] font-black text-blue-400 uppercase tracking-[0.5em]">Compiling Matrix...</p>
+              </div>
+            ) : (
+              <div className="inline-block min-w-full">
+                <table className="border-separate border-spacing-1 lg:border-spacing-3">
+                  <thead>
+                    <tr>
+                      <th className="sticky left-0 z-30 bg-[#080808] p-2 min-w-[40px]"></th>
+                      {gridData.map(s => (
+                        <th key={s.seasonNumber} className="pb-4 text-[12px] font-black text-cyan-400 uppercase tracking-[0.3em] text-center min-w-[50px] lg:min-w-[60px] text-shadow-glow">
+                          S{s.seasonNumber}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...Array(Math.max(0, maxEpisodesCount))].map((_, epIndex) => {
+                      const epNum = epIndex + 1;
+                      return (
+                        <tr key={epNum}>
+                          <td className="sticky left-0 z-30 bg-[#080808] pr-4 py-2 text-[12px] font-black text-cyan-400 text-right uppercase border-r border-white/5 text-shadow-glow">
+                            E{epNum}
+                          </td>
+                          {gridData.map(s => {
+                            const score = activeEpRanker.episodeRankings?.[s.seasonNumber]?.[epNum];
+                            const isSelected = selectedCell?.s === s.seasonNumber && selectedCell?.e === epNum;
+                            
+                            if (epNum > s.episodeCount) {
+                                return <td key={s.seasonNumber + '-' + epNum} className="p-1 opacity-5">
+                                    <div className="w-10 h-10 lg:w-14 lg:h-14 rounded-lg bg-white/5" />
+                                </td>;
+                            }
+
+                            return (
+                              <td 
+                                key={s.seasonNumber + '-' + epNum}
+                                onClick={() => setSelectedCell({ s: s.seasonNumber, e: epNum })}
+                                className="p-0"
+                              >
+                                <div className={`
+                                  w-10 h-10 lg:w-14 lg:h-14 rounded-xl cursor-pointer flex items-center justify-center text-xs lg:text-sm transition-all
+                                  ${getCellColor(score)}
+                                  ${isSelected ? 'ring-2 lg:ring-4 ring-white scale-110 z-20 shadow-2xl' : 'hover:scale-105 active:scale-95'}
+                                `}>
+                                  {score || score === 0 ? score.toFixed(1) : <span className="opacity-10">.</span>}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Integrated Precision Slider */}
+        <div className="h-28 lg:h-36 bg-[#0a0a0a] border-t border-white/10 flex items-center px-6 lg:px-12 gap-8 shrink-0 shadow-2xl">
+           {selectedCell ? (
+               <>
+                <div className="flex items-center gap-4 shrink-0 bg-white/5 px-5 py-2.5 rounded-2xl border border-white/5">
+                    <div className="w-12 h-12 bg-blue-600 text-white rounded-xl flex flex-col items-center justify-center font-black">
+                        <span className="text-[7px] uppercase -mb-1 tracking-tighter">S{selectedCell.s}</span>
+                        <span className="text-lg italic leading-none">E{selectedCell.e}</span>
+                    </div>
+                </div>
+                <div className="flex-1 flex items-center gap-6">
+                    <input
+                        type="range"
+                        min="1.0"
+                        max="10.0"
+                        step="0.1"
+                        value={activeEpRanker.episodeRankings?.[selectedCell.s]?.[selectedCell.e] || 7.5}
+                        onChange={(e) => updateEpRating(e.target.value)}
+                        className="flex-1 h-2 bg-white/10 rounded-full appearance-none cursor-pointer accent-blue-500"
+                    />
+                    <div className="text-4xl lg:text-6xl font-black text-blue-400 w-20 lg:w-32 tabular-nums text-right italic">
+                        {(activeEpRanker.episodeRankings?.[selectedCell.s]?.[selectedCell.e] || 7.5).toFixed(1)}
+                    </div>
+                </div>
+                <button 
+                  onClick={() => { setView('home'); setFullShowData(null); }}
+                  className="bg-white text-black px-8 py-4 rounded-xl font-black uppercase text-[10px] tracking-widest hover:bg-blue-600 hover:text-white transition-all active:scale-95 shadow-xl"
+                >
+                  SAVE
+                </button>
+               </>
+           ) : (
+               <div className="w-full text-center py-4 flex flex-col items-center gap-2 opacity-30">
+                    <SlidersHorizontal size={20} className="text-gray-600" />
+                    <p className="text-gray-600 font-black uppercase text-[9px] tracking-[0.4em]">Tap a cell above to start rating</p>
+               </div>
+           )}
+        </div>
+      </div>
+    );
+  }
+
+  // --- HOME VIEW ---
+  return (
+    <div className="min-h-screen bg-[#050505] text-white p-4 md:p-12 font-sans selection:bg-blue-500/40">
+      
+      {/* Home Header */}
+      <div className="max-w-6xl mx-auto mb-12 text-center">
+        <h1 className="text-5xl md:text-8xl font-black mb-6 tracking-tighter bg-gradient-to-r from-blue-400 via-indigo-500 to-purple-600 bg-clip-text text-transparent italic leading-tight uppercase">
+          ULTIMATE RANKER
+        </h1>
+        <div className="flex flex-col md:flex-row items-center justify-center gap-4 mb-10">
+            <p className="text-gray-600 uppercase tracking-[0.4em] text-[8px] font-black">
+              Series Excellence Performance Index
+            </p>
+            {rankedShows.length > 0 && (
+                <button 
+                    onClick={calculateKnowledge}
+                    disabled={isAnalyzing}
+                    className="flex items-center gap-2 bg-white text-black hover:bg-blue-600 hover:text-white disabled:opacity-50 px-6 py-2.5 rounded-full text-[9px] font-black transition-all shadow-2xl active:scale-95 uppercase"
+                >
+                    {isAnalyzing ? <Loader2 size={12} className="animate-spin" /> : <Brain size={12} />}
+                    {isAnalyzing ? "Processing..." : "Knowledge Index"}
+                </button>
+            )}
+        </div>
+
+        {/* Search */}
+        <div className="relative max-w-2xl mx-auto">
+          <div className="relative flex items-center group">
+            <Search className="absolute left-6 text-gray-700 group-focus-within:text-blue-400 transition-colors" size={20} />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search Series or Movie..."
+              className="w-full bg-[#0d0d0d] border-2 border-white/5 focus:border-blue-500/50 rounded-2xl py-5 pl-16 pr-8 outline-none transition-all text-lg shadow-2xl placeholder:text-gray-800 font-bold"
+            />
+          </div>
+
+          {searchResults.length > 0 && (
+            <div className="absolute top-full left-0 right-0 mt-4 bg-[#0d0d0d] border border-white/10 rounded-3xl overflow-hidden z-[100] shadow-[0_30px_80px_rgba(0,0,0,0.9)] max-h-[50vh] overflow-y-auto custom-scrollbar">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 p-4">
+                {searchResults.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => setSelectedShow(item)}
+                    className="flex flex-col items-center p-2 rounded-2xl hover:bg-white/5 transition-all group text-left relative"
+                  >
+                    <img
+                      src={`https://image.tmdb.org/t/p/w300${item.poster_path}`}
+                      alt="poster"
+                      className="w-full aspect-[2/3] object-cover rounded-xl shadow-xl group-hover:scale-[1.05] transition-transform border border-white/5"
+                    />
+                    <div className="absolute top-4 right-4 bg-black/90 backdrop-blur-md px-2 py-1 rounded-lg text-[7px] font-black uppercase text-blue-400 border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
+                      {item.media_type}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Tier Matrix Area */}
+      <div className="max-w-5xl mx-auto space-y-4">
+        {TIER_CONFIG.map((tier) => {
+          const showsInTier = rankedShows.filter(s => getTierForScore(s.score).id === tier.id);
+          return (
+            <div key={tier.id} className="flex min-h-[140px] bg-[#0d0d0d] rounded-3xl overflow-hidden border border-white/5 group/tier hover:border-white/10 transition-all">
+              <div className={`${tier.color} w-20 md:w-40 flex items-center justify-center text-4xl md:text-7xl font-black text-black/15 italic select-none uppercase`}>
+                {tier.label}
+              </div>
+              <div className="flex-1 p-5 flex flex-wrap gap-4 items-center">
+                {showsInTier.length === 0 && (
+                  <span className="text-white/5 font-black uppercase text-[10px] tracking-[0.6em] ml-6 italic">Unpopulated Slot</span>
+                )}
+                {showsInTier.map((show) => (
+                  <div key={show.id} className="relative group/show">
+                    <img
+                      src={show.poster}
+                      alt={show.title}
+                      onClick={() => {
+                        if (show.mediaType === 'tv') {
+                          fetchFullGridData(show);
+                        }
+                      }}
+                      className="h-28 md:h-40 rounded-2xl border border-white/10 shadow-2xl cursor-pointer transition-all hover:scale-105 active:scale-95 hover:border-blue-500/50"
+                    />
+                    <div className="absolute -top-2 -right-2 opacity-0 group-hover/show:opacity-100 transition-all z-10 flex gap-2">
+                       {show.mediaType === 'tv' && (
+                           <div className="bg-blue-500 p-2 rounded-lg shadow-xl border border-black/20 flex items-center gap-1">
+                               <Zap size={14} className="text-white" fill="currentColor" />
+                               <span className="text-[8px] font-black text-white pr-1 uppercase">EP</span>
+                           </div>
+                       )}
+                      <button onClick={(e) => { e.stopPropagation(); removeShow(show.id); }} className="bg-white p-2 rounded-full hover:bg-red-500 transition-colors shadow-2xl group/btn">
+                        <Trash2 size={14} className="text-black group-hover/btn:text-white" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Analytics Panel (Restored Infos) */}
+      <div className="max-w-5xl mx-auto mt-16 grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-[#0d0d0d] p-8 rounded-3xl border border-white/5 relative overflow-hidden group hover:border-white/10 transition-colors">
+          <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-100 transition-opacity"><Trophy className="text-yellow-500" size={40} /></div>
+          <h3 className="text-gray-500 text-[10px] font-black uppercase tracking-widest mb-2">Total Catalog</h3>
+          <p className="text-5xl font-black italic">{stats.count}</p>
+          <div className="mt-4 h-1 w-12 bg-yellow-500 rounded-full" />
+        </div>
+        <div className="bg-[#0d0d0d] p-8 rounded-3xl border border-white/5 relative overflow-hidden group hover:border-white/10 transition-colors">
+          <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-100 transition-opacity"><Star className="text-blue-500" size={40} /></div>
+          <h3 className="text-gray-500 text-[10px] font-black uppercase tracking-widest mb-2">Artistic Average</h3>
+          <p className="text-5xl font-black italic">{stats.avg}</p>
+          <div className="mt-4 h-1 w-12 bg-blue-500 rounded-full" />
+        </div>
+        <div className="bg-[#0d0d0d] p-8 rounded-3xl border border-white/5 relative overflow-hidden group hover:border-white/10 transition-colors">
+          <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-100 transition-opacity"><Brain className="text-purple-500" size={40} /></div>
+          <h3 className="text-gray-500 text-[10px] font-black uppercase tracking-widest mb-2">Knowledge Index</h3>
+          <p className="text-5xl font-black italic">{stats.kScore}</p>
+          <div className="mt-4 h-1 w-12 bg-purple-500 rounded-full" />
+        </div>
+      </div>
+
+      {/* Knowledge Verification Modal */}
+      {showKnowledgeModal && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/98 backdrop-blur-2xl" onClick={() => setShowKnowledgeModal(false)} />
+          <div className="relative bg-[#0d0d0d] w-full max-w-md rounded-[3rem] border border-blue-500/20 p-12 text-center shadow-2xl animate-in zoom-in-95">
+            <Brain size={50} className="mx-auto text-blue-500 mb-6" />
+            <h2 className="text-2xl font-black mb-2 uppercase italic tracking-tighter">Ranking Verdict</h2>
+            <div className="text-8xl font-black text-transparent bg-gradient-to-br from-blue-400 via-indigo-500 to-purple-600 bg-clip-text mb-6 italic leading-none py-2">
+              {knowledgeScore}%
+            </div>
+            <button onClick={() => setShowKnowledgeModal(false)} className="w-full bg-white text-black font-black py-6 rounded-3xl hover:bg-blue-500 hover:text-white transition-all uppercase text-[10px] tracking-widest shadow-2xl">
+              Accept Verdict
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Show selection Rating Modal */}
+      {selectedShow && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/98 backdrop-blur-xl" onClick={() => setSelectedShow(null)} />
+          <div className="relative bg-[#0d0d0d] w-full max-w-lg rounded-[2.5rem] border border-white/10 shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-300">
+            <div className="h-48 relative shrink-0">
+              <img src={`https://image.tmdb.org/t/p/w780${selectedShow.backdrop_path || selectedShow.poster_path}`} className="w-full h-full object-cover opacity-40" alt="backdrop" />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#0d0d0d] to-transparent" />
+              <div className="absolute bottom-6 left-10 right-10">
+                <h2 className="text-2xl font-black text-white italic uppercase tracking-tighter leading-none">{selectedShow.name || selectedShow.title}</h2>
+              </div>
+              <button onClick={() => setSelectedShow(null)} className="absolute top-6 right-6 p-2 bg-black/50 hover:bg-white/10 rounded-full transition-colors text-white/40"><X size={20} /></button>
+            </div>
+            <div className="p-8 pt-4">
+              <div className="grid grid-cols-1 gap-4 max-h-[40vh] overflow-y-auto custom-scrollbar pr-3">
+                {CATEGORIES.map((cat) => (
+                  <div key={cat} className="bg-white/5 p-4 rounded-2xl flex flex-col gap-2 border border-white/5 transition-all hover:border-white/10">
+                    <div className="flex justify-between items-center px-1">
+                      <label className="text-[9px] font-black uppercase text-gray-500 tracking-widest">{cat}</label>
+                      <span className="text-blue-400 font-black text-2xl italic leading-none">{ratings[cat]}</span>
+                    </div>
+                    <input type="range" min="1" max="10" value={ratings[cat]} onChange={(e) => setRatings({...ratings, [cat]: parseInt(e.target.value)})} className="w-full h-1.5 bg-black rounded-full appearance-none cursor-pointer accent-blue-500" />
+                  </div>
+                ))}
+              </div>
+              <button onClick={saveRanking} className="w-full bg-blue-600 text-white font-black py-5 rounded-2xl transition-all shadow-[0_20px_50px_rgba(0,85,255,0.2)] mt-8 uppercase text-xs tracking-widest active:scale-95">
+                REGISTER ENTRY
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #222; border-radius: 10px; }
+        
+        .text-shadow-glow {
+            text-shadow: 0 0 12px rgba(0, 242, 255, 0.9);
+        }
+
+        input[type="range"] { -webkit-appearance: none; background: transparent; }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 20px;
+            width: 20px;
+            border-radius: 50%;
+            background: #0088ff;
+            cursor: pointer;
+            box-shadow: 0 0 15px rgba(0,136,255,0.6);
+            border: 4px solid #000;
+        }
+      `}</style>
+    </div>
+  );
+}
+
